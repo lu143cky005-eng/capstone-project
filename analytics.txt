@@ -1,0 +1,1115 @@
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+from sklearn.model_selection import (
+    train_test_split,
+    GridSearchCV
+)
+
+from sklearn.pipeline import Pipeline
+
+from sklearn.linear_model import (
+    LogisticRegression,
+    LinearRegression
+)
+
+from sklearn.tree import (
+    DecisionTreeClassifier,
+    plot_tree
+)
+
+from sklearn.ensemble import RandomForestClassifier
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+    roc_curve,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
+)
+
+
+# ============================================================
+# PATHS
+# ============================================================
+
+BASE_DIR = Path("module_2").parent
+PLOT_DIR = BASE_DIR / "plots"
+DATA_FILE= BASE_DIR / "titanic"
+PLOT_DIR.mkdir(exist_ok=True)
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+df= sns.load_dataset(DATA_FILE)
+
+print("=" * 70)
+print("DATASET")
+print("=" * 70)
+
+print(df.shape)
+print(df.head())
+
+
+# ============================================================
+# CLASSIFICATION FEATURES
+# ============================================================
+
+features = [
+    "pclass",
+    "sex",
+    "age",
+    "sibsp",
+    "parch",
+    "fare",
+    "embarked"
+]
+
+target = "survived"
+
+X = df[features].copy()
+y = df[target].copy()
+
+
+# ============================================================
+# CLASS BALANCE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("CLASS BALANCE")
+print("=" * 70)
+
+print(y.value_counts())
+
+print("\nClass percentages:")
+print(
+    y.value_counts(normalize=True)
+    .mul(100)
+)
+
+
+# ============================================================
+# TRAIN TEST SPLIT
+# ============================================================
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.20,
+    random_state=42,
+    stratify=y
+)
+
+print("\nTraining rows:", len(X_train))
+print("Testing rows:", len(X_test))
+
+
+# ============================================================
+# PREPROCESSING
+# ============================================================
+
+numeric_features = [
+    "age",
+    "sibsp",
+    "parch",
+    "fare"
+]
+
+categorical_features = [
+    "sex",
+    "embarked"
+]
+
+
+numeric_pipeline = Pipeline([
+    (
+        "imputer",
+        SimpleImputer(strategy="median")
+    ),
+    (
+        "scaler",
+        StandardScaler()
+    )
+])
+
+
+categorical_pipeline = Pipeline([
+    (
+        "imputer",
+        SimpleImputer(strategy="most_frequent")
+    ),
+    (
+        "encoder",
+        OneHotEncoder(
+            handle_unknown="ignore"
+        )
+    )
+])
+
+
+preprocessor = ColumnTransformer([
+    (
+        "numeric",
+        numeric_pipeline,
+        numeric_features
+    ),
+    (
+        "categorical",
+        categorical_pipeline,
+        categorical_features
+    )
+])
+
+
+# ============================================================
+# CLASSIFIERS
+# ============================================================
+
+models = {
+
+    "Logistic Regression": Pipeline([
+        (
+            "preprocessing",
+            preprocessor
+        ),
+        (
+            "model",
+            LogisticRegression(
+                max_iter=1000,
+                random_state=42
+            )
+        )
+    ]),
+
+    "Decision Tree": Pipeline([
+        (
+            "preprocessing",
+            preprocessor
+        ),
+        (
+            "model",
+            DecisionTreeClassifier(
+                random_state=42
+            )
+        )
+    ]),
+
+    "Random Forest": Pipeline([
+        (
+            "preprocessing",
+            preprocessor
+        ),
+        (
+            "model",
+            RandomForestClassifier(
+                n_estimators=200,
+                random_state=42,
+                oob_score=True
+            )
+        )
+    ])
+}
+
+
+# ============================================================
+# EVALUATION FUNCTION
+# ============================================================
+
+results = []
+roc_data = {}
+
+
+def evaluate_model(name, model):
+
+    model.fit(X_train, y_train)
+
+    predictions = model.predict(X_test)
+
+    probabilities = model.predict_proba(
+        X_test
+    )[:, 1]
+
+    accuracy = accuracy_score(
+        y_test,
+        predictions
+    )
+
+    precision = precision_score(
+        y_test,
+        predictions,
+        zero_division=0
+    )
+
+    recall = recall_score(
+        y_test,
+        predictions,
+        zero_division=0
+    )
+
+    f1 = f1_score(
+        y_test,
+        predictions,
+        zero_division=0
+    )
+
+    auc = roc_auc_score(
+        y_test,
+        probabilities
+    )
+
+    cm = confusion_matrix(
+        y_test,
+        predictions
+    )
+
+    print("\n" + "-" * 60)
+    print(name)
+    print("-" * 60)
+
+    print("Accuracy :", accuracy)
+    print("Precision:", precision)
+    print("Recall   :", recall)
+    print("F1       :", f1)
+    print("AUC      :", auc)
+
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    results.append({
+        "Model": name,
+        "Accuracy": accuracy,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "AUC": auc
+    })
+
+    # --------------------------------------------------------
+    # Confusion Matrix Plot
+    # --------------------------------------------------------
+
+    plt.figure(figsize=(5, 4))
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues"
+    )
+
+    plt.title(
+        f"{name} - Confusion Matrix"
+    )
+
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+
+    safe_name = (
+        name.lower()
+        .replace(" ", "_")
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        PLOT_DIR /
+        f"{safe_name}_confusion_matrix.png"
+    )
+
+    plt.close()
+
+    # --------------------------------------------------------
+    # ROC
+    # --------------------------------------------------------
+
+    fpr, tpr, _ = roc_curve(
+        y_test,
+        probabilities
+    )
+
+    roc_data[name] = {
+        "fpr": fpr,
+        "tpr": tpr,
+        "auc": auc
+    }
+
+    return model
+
+
+# ============================================================
+# TRAIN ALL CLASSIFIERS
+# ============================================================
+
+trained_models = {}
+
+for name, model in models.items():
+
+    trained_models[name] = evaluate_model(
+        name,
+        model
+    )
+
+
+# ============================================================
+# CLASSIFIER COMPARISON TABLE
+# ============================================================
+
+comparison_df = pd.DataFrame(results)
+
+print("\n" + "=" * 70)
+print("CLASSIFIER COMPARISON")
+print("=" * 70)
+
+print(
+    comparison_df.to_string(
+        index=False
+    )
+)
+
+comparison_df.to_csv(
+    BASE_DIR /
+    "classifier_comparison.csv",
+    index=False
+)
+
+
+# ============================================================
+# ROC CURVES
+# ============================================================
+
+plt.figure(figsize=(8, 6))
+
+for name, data in roc_data.items():
+
+    plt.plot(
+        data["fpr"],
+        data["tpr"],
+        label=f"{name} AUC={data['auc']:.3f}"
+    )
+
+plt.plot(
+    [0, 1],
+    [0, 1],
+    linestyle="--"
+)
+
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+
+plt.title("ROC Curves")
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.savefig(
+    PLOT_DIR / "roc_curves.png"
+)
+
+plt.close()
+
+
+# ============================================================
+# DECISION TREE VISUALIZATION
+# ============================================================
+
+tree_model = trained_models[
+    "Decision Tree"
+]
+
+tree_preprocessor = (
+    tree_model
+    .named_steps["preprocessing"]
+)
+
+tree_classifier = (
+    tree_model
+    .named_steps["model"]
+)
+
+feature_names = (
+    tree_preprocessor
+    .get_feature_names_out()
+)
+
+plt.figure(figsize=(22, 12))
+
+plot_tree(
+    tree_classifier,
+    feature_names=feature_names,
+    class_names=[
+        "Not Survived",
+        "Survived"
+    ],
+    filled=True,
+    max_depth=4,
+    fontsize=8
+)
+
+plt.title(
+    "Decision Tree - Titanic Survival"
+)
+
+plt.tight_layout()
+
+plt.savefig(
+    PLOT_DIR / "decision_tree.png"
+)
+
+plt.close()
+
+
+# ============================================================
+# CLASS IMBALANCE EXPERIMENT
+# ============================================================
+
+print("\n" + "=" * 70)
+print("IMBALANCE EXPERIMENT")
+print("=" * 70)
+
+
+# -------------------------------
+# Baseline
+# -------------------------------
+
+baseline = Pipeline([
+    (
+        "preprocessing",
+        preprocessor
+    ),
+    (
+        "model",
+        LogisticRegression(
+            max_iter=1000,
+            random_state=42
+        )
+    )
+])
+
+baseline.fit(
+    X_train,
+    y_train
+)
+
+baseline_pred = baseline.predict(X_test)
+
+
+# -------------------------------
+# Class Weight Balanced
+# -------------------------------
+
+balanced = Pipeline([
+    (
+        "preprocessing",
+        preprocessor
+    ),
+    (
+        "model",
+        LogisticRegression(
+            max_iter=1000,
+            class_weight="balanced",
+            random_state=42
+        )
+    )
+])
+
+balanced.fit(
+    X_train,
+    y_train
+)
+
+balanced_pred = balanced.predict(X_test)
+
+
+# -------------------------------
+# SMOTE
+# -------------------------------
+
+smote_pipeline = ImbPipeline([
+    (
+        "preprocessing",
+        preprocessor
+    ),
+
+    (
+        "smote",
+        SMOTE(
+            random_state=42
+        )
+    ),
+
+    (
+        "model",
+        LogisticRegression(
+            max_iter=1000,
+            random_state=42
+        )
+    )
+])
+
+smote_pipeline.fit(
+    X_train,
+    y_train
+)
+
+smote_pred = smote_pipeline.predict(
+    X_test
+)
+
+
+def imbalance_metrics(
+    name,
+    actual,
+    prediction
+):
+
+    return {
+        "Strategy": name,
+
+        "Precision": precision_score(
+            actual,
+            prediction,
+            zero_division=0
+        ),
+
+        "Recall": recall_score(
+            actual,
+            prediction,
+            zero_division=0
+        ),
+
+        "F1": f1_score(
+            actual,
+            prediction,
+            zero_division=0
+        )
+    }
+
+
+imbalance_results = pd.DataFrame([
+
+    imbalance_metrics(
+        "Baseline",
+        y_test,
+        baseline_pred
+    ),
+
+    imbalance_metrics(
+        "Class Weight Balanced",
+        y_test,
+        balanced_pred
+    ),
+
+    imbalance_metrics(
+        "SMOTE",
+        y_test,
+        smote_pred
+    )
+
+])
+
+
+print(
+    imbalance_results.to_string(
+        index=False
+    )
+)
+
+imbalance_results.to_csv(
+    BASE_DIR /
+    "imbalance_comparison.csv",
+    index=False
+)
+
+
+# ============================================================
+# RANDOM FOREST GRID SEARCH
+# ============================================================
+
+print("\n" + "=" * 70)
+print("RANDOM FOREST GRID SEARCH")
+print("=" * 70)
+
+
+rf_pipeline = Pipeline([
+    (
+        "preprocessing",
+        preprocessor
+    ),
+
+    (
+        "model",
+        RandomForestClassifier(
+            random_state=42,
+            oob_score=True
+        )
+    )
+])
+
+
+param_grid = {
+
+    "model__n_estimators": [
+        100,
+        200
+    ],
+
+    "model__max_depth": [
+        None,
+        5,
+        10
+    ],
+
+    "model__max_features": [
+        "sqrt",
+        "log2"
+    ]
+}
+
+
+grid_search = GridSearchCV(
+    estimator=rf_pipeline,
+    param_grid=param_grid,
+    cv=5,
+    scoring="f1",
+    n_jobs=-1
+)
+
+grid_search.fit(
+    X_train,
+    y_train
+)
+
+
+print(
+    "Best Parameters:"
+)
+
+print(
+    grid_search.best_params_
+)
+
+print(
+    "\nBest CV F1:",
+    grid_search.best_score_
+)
+
+
+best_rf = grid_search.best_estimator_
+
+print(
+    "\nOOB Score:",
+    best_rf
+    .named_steps["model"]
+    .oob_score_
+)
+
+
+# ============================================================
+# BEST RANDOM FOREST TEST METRICS
+# ============================================================
+
+best_rf_pred = best_rf.predict(
+    X_test
+)
+
+best_rf_prob = best_rf.predict_proba(
+    X_test
+)[:, 1]
+
+
+print("\nBest Random Forest Test Results")
+
+print(
+    "Accuracy:",
+    accuracy_score(
+        y_test,
+        best_rf_pred
+    )
+)
+
+print(
+    "Precision:",
+    precision_score(
+        y_test,
+        best_rf_pred
+    )
+)
+
+print(
+    "Recall:",
+    recall_score(
+        y_test,
+        best_rf_pred
+    )
+)
+
+print(
+    "F1:",
+    f1_score(
+        y_test,
+        best_rf_pred
+    )
+)
+
+print(
+    "AUC:",
+    roc_auc_score(
+        y_test,
+        best_rf_prob
+    )
+)
+
+
+# ============================================================
+# SAVE COMPLETE PIPELINE
+# ============================================================
+
+MODEL_FILE = (
+    BASE_DIR /
+    "best_pipeline.joblib"
+)
+
+joblib.dump(
+    best_rf,
+    MODEL_FILE
+)
+
+print(
+    "\nSaved:",
+    MODEL_FILE
+)
+
+
+# ============================================================
+# RELOAD MODEL
+# ============================================================
+
+loaded_model = joblib.load(
+    MODEL_FILE
+)
+
+sample_input = X_test.iloc[[0]]
+
+prediction = loaded_model.predict(
+    sample_input
+)
+
+probability = loaded_model.predict_proba(
+    sample_input
+)[:, 1]
+
+print("\nReloaded model test")
+
+print(
+    "Input:"
+)
+
+print(
+    sample_input
+)
+
+print(
+    "Prediction:",
+    prediction
+)
+
+print(
+    "Probability:",
+    probability
+)
+
+
+# ============================================================
+# REGRESSION - PREDICT FARE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("FARE REGRESSION")
+print("=" * 70)
+
+
+regression_features = [
+    "pclass",
+    "sex",
+    "age",
+    "sibsp",
+    "parch",
+    "embarked"
+]
+
+regression_target = "fare"
+
+
+regression_df = df[
+    regression_features +
+    [regression_target]
+].copy()
+
+
+X_reg = regression_df[
+    regression_features
+]
+
+y_reg = regression_df[
+    regression_target
+]
+
+
+X_reg_train, X_reg_test, y_reg_train, y_reg_test = (
+    train_test_split(
+        X_reg,
+        y_reg,
+        test_size=0.20,
+        random_state=42
+    )
+)
+
+
+regression_numeric = [
+    "age",
+    "sibsp",
+    "parch"
+]
+
+regression_categorical = [
+    "sex",
+    "embarked"
+]
+
+regression_preprocessor = ColumnTransformer([
+
+    (
+        "numeric",
+        Pipeline([
+            (
+                "imputer",
+                SimpleImputer(
+                    strategy="median"
+                )
+            ),
+            (
+                "scaler",
+                StandardScaler()
+            )
+        ]),
+        regression_numeric
+    ),
+
+    (
+        "categorical",
+        Pipeline([
+            (
+                "imputer",
+                SimpleImputer(
+                    strategy="most_frequent"
+                )
+            ),
+            (
+                "encoder",
+                OneHotEncoder(
+                    handle_unknown="ignore"
+                )
+            )
+        ]),
+        regression_categorical
+    ),
+
+    (
+        "pclass",
+        SimpleImputer(
+            strategy="most_frequent"
+        ),
+        ["pclass"]
+    )
+])
+
+
+regression_pipeline = Pipeline([
+
+    (
+        "preprocessing",
+        regression_preprocessor
+    ),
+
+    (
+        "model",
+        LinearRegression()
+    )
+])
+
+
+regression_pipeline.fit(
+    X_reg_train,
+    y_reg_train
+)
+
+
+reg_predictions = regression_pipeline.predict(
+    X_reg_test
+)
+
+
+mae = mean_absolute_error(
+    y_reg_test,
+    reg_predictions
+)
+
+rmse = np.sqrt(
+    mean_squared_error(
+        y_reg_test,
+        reg_predictions
+    )
+)
+
+r2 = r2_score(
+    y_reg_test,
+    reg_predictions
+)
+
+
+# Number of predictors after preprocessing
+X_reg_transformed = (
+    regression_pipeline
+    .named_steps["preprocessing"]
+    .transform(X_reg_test)
+)
+
+p = X_reg_transformed.shape[1]
+n = len(y_reg_test)
+
+
+adjusted_r2 = (
+    1
+    - (1 - r2)
+    * (n - 1)
+    / (n - p - 1)
+)
+
+
+print(
+    "MAE:",
+    mae
+)
+
+print(
+    "RMSE:",
+    rmse
+)
+
+print(
+    "R²:",
+    r2
+)
+
+print(
+    "Adjusted R²:",
+    adjusted_r2
+)
+
+
+regression_results = pd.DataFrame({
+
+    "Metric": [
+        "MAE",
+        "RMSE",
+        "R2",
+        "Adjusted R2"
+    ],
+
+    "Value": [
+        mae,
+        rmse,
+        r2,
+        adjusted_r2
+    ]
+
+})
+
+
+regression_results.to_csv(
+    BASE_DIR /
+    "regression_results.csv",
+    index=False
+)
+
+
+# ============================================================
+# RESIDUAL PLOT
+# ============================================================
+
+residuals = (
+    y_reg_test -
+    reg_predictions
+)
+
+
+plt.figure(figsize=(8, 5))
+
+plt.scatter(
+    reg_predictions,
+    residuals,
+    alpha=0.6
+)
+
+plt.axhline(
+    0,
+    linestyle="--"
+)
+
+plt.xlabel("Predicted Fare"
+)
+
+plt.ylabel(
+    "Residual"
+)
+
+plt.title(
+    "Fare Regression Residual Plot"
+)
+
+plt.tight_layout()
+
+plt.savefig(
+    PLOT_DIR /
+    "regression_residuals.png"
+)
+
+plt.close()
+
+
+# ============================================================
+# FINAL OUTPUT
+# ============================================================
+
+print("\n" + "=" * 70)
+print("MODULE 2 COMPLETED")
+print("=" * 70)
+
+print(
+    "\nGenerated files:"
+)
+
+print("1. classifier_comparison.csv")
+print("2. imbalance_comparison.csv")
+print("3. regression_results.csv")
+print("4. best_pipeline.joblib")
+print("5. plots/")

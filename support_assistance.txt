@@ -1,0 +1,593 @@
+module_3 colab link:
+                      https://colab.research.google.com/drive/11vMP2w1OQFoO-6lO4V6iyVlr0-KplmXI
+
+
+documents=[
+    "Delivery Policy: Zepto delivers grocery and household essentials to serviceable pin codes within 10 to 30 minutes of order confirmation, depending on the customer's delivery zone and current order volume. Standard delivery is free on orders over INR 149; orders below this threshold incur a flat INR 25 delivery fee. Priority delivery, which reserves the next available rider slot, is available at checkout for an additional INR 15. Zepto does not currently deliver to addresses outside its listed serviceable pin codes.",
+    "Returns & Refunds: Grocery and perishable items may be reported for a return within 24 hours of delivery if damaged, spoiled, or incorrect; non-perishable packaged items may be returned within 7 days of delivery in unopened, resalable condition. Approved refunds are credited to the original payment method within 3–5 business days, or instantly to the Zepto wallet if the customer opts for wallet credit. Personal care items that have been opened are non-returnable except in the case of a manufacturing defect. Return pickup, where required, is arranged free of cost by Zepto.",
+    "Membership Tiers: Zepto offers three account tiers: Basic (free, default tier, standard delivery fees apply), Zepto Pass (INR 49 per month, free standard delivery on all orders and 5% off select categories), and Zepto Pass+ (INR 99 per month, free priority delivery, 10% off select categories, and early access to limited-time deals 24 hours before they go live to Basic and Pass members). Membership can be cancelled at any time from account settings; cancelling stops the next billing cycle but does not refund the current membership period.",
+    "Order Tracking: Every Zepto order shows a live rider-tracking map from the moment it is packed until delivery, accessible from the 'Track Order' screen. Estimated delivery time updates automatically as the rider moves. If an order's status shows no movement for more than 20 minutes past its original estimated delivery time, customers should contact support directly rather than continue waiting, since this indicates a likely delivery issue.",
+    "Order Cancellation Policy: Orders can be cancelled free of cost any time before the order status changes to 'Packed', typically within the first 2 minutes of placing the order. Once an order has been packed, it can no longer be cancelled through the app, since the rider is dispatched immediately after packing given Zepto's quick-delivery model. If a packed order cannot be delivered due to a Zepto-side issue (for example, rider unavailability), the order is auto-cancelled and fully refunded without any cancellation fee.",
+    "Damaged or Missing Items: If an order arrives with damaged, spoiled, or missing items, customers must report it within 24 hours of delivery through the 'Report an Issue' button on the order page. Zepto ships a free replacement or issues a full refund for damaged, spoiled, or missing items without requiring the customer to return the original item, unless the order value exceeds INR 1000, in which case a photo of the issue must be submitted through the report form before a replacement or refund is processed.",
+    "Gift Cards: Zepto gift cards are available in fixed denominations of INR 100, INR 250, INR 500, and INR 1000, and are delivered by email or SMS within minutes of purchase. Gift cards are valid for 1 year from the date of issue and carry no maintenance fees. Gift card balance can be combined with one other payment method at checkout but cannot be combined with another gift card in the same transaction. Gift card balance cannot be redeemed for cash except where required by law.",
+    "Customer Support Hours: Zepto customer support is available via in-app chat 24 hours a day, 7 days a week, given the time-sensitive nature of quick commerce deliveries. Average in-app chat response time is under 2 minutes. Email support is also available for non-urgent queries and is answered within 24 hours on business days. Phone support is not offered."]
+
+
+
+!pip install -q fastapi uvicorn pydantic sentence-transformers chromadb langgraph langchain-core nest-asyncio
+
+for i, content in enumerate(documents):
+  with open(f"docs_{i}.txt","w") as f:
+    f.write(content)
+
+import os
+
+os.makedirs("docs", exist_ok=True)
+for i in range(1,9):
+  with open(f"docs/doc_{i}.txt","w") as f:
+    f.write(documents[i-1])
+
+print("docs folder created")
+from pathlib import Path
+
+DOCS_DIR = Path("docs")
+
+files = sorted(DOCS_DIR.glob("doc_*.txt"))
+
+print("Number of documents:", len(files))
+
+for file in files:
+    print(file)
+
+documents = []
+document_ids = []
+metadatas = []
+
+for file in files:
+
+    text = file.read_text(
+        encoding="utf-8"
+    ).strip()
+
+    documents.append(text)
+
+    document_ids.append(file.stem)
+
+    metadatas.append({
+        "source": file.name
+    })
+
+print("Documents loaded:", len(documents))
+print(documents[0][:1000])
+
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
+
+print("Embedding model loaded")
+
+embedding = model.encode(
+    documents[0],
+    normalize_embeddings=True
+)
+
+print("Embedding type:", type(embedding))
+print("Embedding shape:", embedding.shape)
+embeddings = model.encode(
+    documents,
+    normalize_embeddings=True,
+    show_progress_bar=True
+)
+
+print("Number of embeddings:", len(embeddings))
+print("Embedding dimension:", embeddings.shape[1])
+
+import chromadb
+
+client = chromadb.PersistentClient(
+    path="./chroma_db"
+)
+
+collection = client.get_or_create_collection(
+    name="zepto_policies",
+    metadata={
+        "hnsw:space": "cosine"
+    }
+)
+
+print("ChromaDB collection created")
+
+collection.upsert(
+    ids=document_ids,
+    documents=documents,
+    embeddings=embeddings.tolist(),
+    metadatas=metadatas
+)
+
+print(
+    "Documents stored:",
+    collection.count()
+)
+
+query = "What is the return policy?"
+
+query_embedding = model.encode(
+    query,
+    normalize_embeddings=True
+).tolist()
+
+results = collection.query(
+    query_embeddings=[query_embedding],
+    n_results=3
+)
+
+print(results)
+
+retrieved_documents = results["documents"][0]
+retrieved_sources = results["metadatas"][0]
+retrieved_distances = results["distances"][0]
+
+for i in range(len(retrieved_documents)):
+
+    print("=" * 60)
+
+    print("Rank:", i + 1)
+
+    print(
+        "Source:",
+        retrieved_sources[i]["source"]
+    )
+
+    print(
+        "Distance:",
+        retrieved_distances[i]
+    )
+
+    print(
+        "Document:"
+    )
+
+    print(
+        retrieved_documents[i][:500]
+    )
+
+def retrieve(query, top_k=3):
+
+    query_embedding = model.encode(
+        query,
+        normalize_embeddings=True
+    ).tolist()
+
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k
+    )
+
+    retrieved = []
+
+    documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+
+    for document, metadata, distance in zip(
+        documents,
+        metadatas,
+        distances
+    ):
+
+        retrieved.append({
+            "document": document,
+            "source": metadata["source"],
+            "distance": float(distance)
+        })
+
+    return retrieved
+results = retrieve(
+    "How can I get a refund?"
+)
+
+for result in results:
+
+    print(
+        result["source"],
+        result["distance"]
+    )
+
+
+POLICY_KEYWORDS = [
+    "delivery",
+    "return",
+    "refund",
+    "membership",
+    "tracking",
+    "cancel",
+    "gift card",
+    "support hours"
+]
+
+
+def classify_intent(query):
+
+    query_lower = query.lower()
+
+    if any(
+        keyword in query_lower
+        for keyword in POLICY_KEYWORDS
+    ):
+        return "policy_question"
+
+    return "general_question"
+
+    print(
+    classify_intent(
+        "What is your refund policy?"
+    )
+)
+
+print(
+    classify_intent(
+        "What is artificial intelligence?"
+    )
+)
+
+def mock_policy_answer(retrieved):
+
+    if not retrieved:
+
+        return (
+            "Based on the retrieved context: "
+            "No relevant policy context was found."
+        )
+
+    top_chunk = (
+        retrieved[0]["document"]
+        .replace("\n", " ")
+        .strip()
+    )
+
+    snippet = top_chunk[:500]
+
+    return (
+        "Based on the retrieved context: "
+        + snippet
+    )
+def direct_answer():
+
+        return (
+        "I can only answer questions about "
+        "Zepto policies right now."
+    )
+
+from typing import TypedDict
+
+
+class AssistantState(TypedDict, total=False):
+
+    query: str
+
+    intent: str
+
+    retrieved_documents: list
+
+    answer: str
+
+    sources: list[str]
+
+    confidence: float
+
+
+def classify_intent_node(state):
+
+    intent = classify_intent(
+        state["query"]
+    )
+
+    return {
+        "intent": intent
+    }
+
+def retrieve_and_answer_node(state):
+
+    query = state["query"]
+
+    retrieved = retrieve(
+        query,
+        top_k=3
+    )
+
+    answer = mock_policy_answer(
+        retrieved
+    )
+
+    sources = [
+        item["source"]
+        for item in retrieved
+    ]
+
+    return {
+        "retrieved_documents": retrieved,
+        "answer": answer,
+        "sources": sources,
+        "confidence": 1.0
+    }
+def direct_answer_node(state):
+
+    return {
+        "answer": "I can only answer questions about Zepto policies right now.",
+        "sources": [],
+        "confidence": 1.0
+    }
+
+def route_intent(state):
+
+    if (
+        state["intent"]
+        == "policy_question"
+    ):
+
+        return "retrieve_and_answer"
+
+    return "direct_answer"
+
+from langgraph.graph import (
+    StateGraph,
+    START,
+    END
+)
+
+
+builder = StateGraph(
+    AssistantState
+)
+
+
+builder.add_node(
+    "classify_intent",
+    classify_intent_node
+)
+
+
+builder.add_node(
+    "retrieve_and_answer",
+    retrieve_and_answer_node
+)
+
+
+builder.add_node(
+    "direct_answer",
+    direct_answer_node
+)
+
+
+builder.add_edge(
+    START,
+    "classify_intent"
+)
+
+
+builder.add_conditional_edges(
+    "classify_intent",
+    route_intent,
+    {
+        "retrieve_and_answer":
+            "retrieve_and_answer",
+
+        "direct_answer":
+            "direct_answer"
+    }
+)
+
+
+builder.add_edge(
+    "retrieve_and_answer",
+    END
+)
+
+
+builder.add_edge(
+    "direct_answer",
+    END
+)
+
+
+graph = builder.compile()
+
+print("LangGraph created successfully")
+
+result = graph.invoke({
+    "query": "What is artificial intelligence?"
+})
+
+print("Intent:")
+print(result["intent"])
+
+print("\nAnswer:")
+print(result["answer"])
+
+print("\nSources:")
+print(result["sources"])
+
+print("\nConfidence:")
+print(result["confidence"])
+
+questions = [
+    "What is the delivery policy?",
+    "How can I get a refund?",
+    "How does membership work?",
+    "How can I track my order?",
+    "Can I cancel my order?",
+    "Do you provide gift cards?",
+    "What are the support hours?"
+]
+
+
+for question in questions:
+
+    result = graph.invoke({
+        "query": question
+    })
+
+    print("=" * 70)
+
+    print("QUESTION:")
+    print(question)
+
+    print("\nINTENT:")
+    print(result["intent"])
+
+    print("\nANSWER:")
+    print(result["answer"])
+
+    print("\nSOURCES:")
+    print(result["sources"])
+
+from pydantic import BaseModel, Field
+
+
+class AskRequest(BaseModel):
+
+    query: str
+
+
+class AskResponse(BaseModel):
+
+    answer: str
+
+    sources: list[str]
+
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0
+    )
+
+response = AskResponse(
+    answer="Test answer",
+    sources=["doc_01.txt"],
+    confidence=1.0
+)
+
+print(response)
+
+def ask_assistant(query):
+
+    request = AskRequest(
+        query=query
+    )
+
+    result = graph.invoke({
+        "query": request.query
+    })
+
+    response = AskResponse(
+        answer=result["answer"],
+        sources=result.get(
+            "sources",
+            []
+        ),
+        confidence=result.get(
+            "confidence",
+            1.0
+        )
+    )
+
+    return response
+
+response = ask_assistant(
+    "What is the return policy?"
+)
+
+print(response.model_dump())
+response = ask_assistant(
+    "What is Python?"
+)
+
+print(response.model_dump())
+
+from fastapi import FastAPI
+
+
+app = FastAPI(
+    title="Zepto Support Assistant",
+    description="RAG-based Zepto policy assistant",
+    version="1.0.0"
+)
+
+
+@app.get("/")
+def root():
+
+    return {
+        "message":
+        "Zepto Support Assistant is running"
+    }
+
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy"
+    }
+
+
+@app.post(
+    "/ask",
+    response_model=AskResponse
+)
+def ask(request: AskRequest):
+
+    result = graph.invoke({
+        "query": request.query
+    })
+
+    return AskResponse(
+        answer=result["answer"],
+        sources=result.get(
+            "sources",
+            []
+        ),
+        confidence=result.get(
+            "confidence",
+            1.0
+        )
+    )
+
+import nest_asyncio
+import uvicorn
+import threading
+
+nest_asyncio.apply()
+
+
+def run_server():
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
+
+
+thread = threading.Thread(
+    target=run_server,
+    daemon=True
+)
+
+thread.start()
+
+import requests
+
+response = requests.post(
+    "http://127.0.0.1:8000/ask",
+    json={
+        "query":
+        "What is the return policy?"
+    }
+)
+
+print(response.status_code)
+
+print(response.json())
+

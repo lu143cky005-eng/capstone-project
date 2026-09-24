@@ -1,0 +1,309 @@
+from pathlib import Path
+from urllib.parse import urljoin
+import sqlite3
+import os
+
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+
+BASE_URL = "https://books.toscrape.com/"
+EXCHANGE_RATE = 105.50
+
+DATA_DIR = Path('module_1').parent
+DB_PATH = "books.db"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+
+def get_soup(url):
+    response = requests.get(url, headers=HEADERS, timeout=20)
+    response.raise_for_status()
+    return BeautifulSoup(response.text, "html.parser")
+
+
+def scrape_books(pages=5):
+    records = []
+
+    for page in range(1, pages + 1):
+        url = urljoin(BASE_URL, f"catalogue/page-{page}.html")
+        soup = get_soup(url)
+
+        for article in soup.select("article.product_pod"):
+            title_tag = article.select_one("h3 a")
+            price_tag = article.select_one(".price_color")
+            rating_tag = article.select_one("p.star-rating")
+            availability_tag = article.select_one(".availability")
+
+            title = title_tag.get("title", "").strip()
+            price = price_tag.get_text(strip=True) if price_tag else ""
+            rating = ""
+
+            if rating_tag:
+                classes = rating_tag.get("class", [])
+                for value in ["One", "Two", "Three", "Four", "Five"]:
+                    if value in classes:
+                        rating = value
+                        break
+
+            availability = (
+                availability_tag.get_text(" ", strip=True)
+                if availability_tag
+                else ""
+            )
+
+            book_href = title_tag.get("href")
+            book_url = urljoin(url, book_href)
+
+            book_soup = get_soup(book_url)
+
+            breadcrumb = book_soup.select(
+                "ul.breadcrumb li"
+            )
+
+            category = (
+                breadcrumb[-2].get_text(strip=True)
+                if len(breadcrumb) >= 2
+                else "Unknown"
+            )
+
+            records.append({
+                "title": title,
+                "price": price,
+                "star_rating": rating,
+                "availability": availability,
+                "category": category
+            })
+
+    return pd.DataFrame(records)
+
+
+def clean_data(df):
+    df = df.copy()
+
+    df["price_gbp"] = (
+        df["price"]
+        .str.replace("£", "", regex=False)
+        .str.strip()
+    )
+
+    df["price_gbp"] = pd.to_numeric(
+        df["price_gbp"],
+        errors="coerce"
+    )
+
+    median_price = df["price_gbp"].median()
+    df["price_gbp"] = df["price_gbp"].fillna(median_price)
+
+    rating_map = {
+        "One": 1,
+        "Two": 2,
+        "Three": 3,
+        "Four": 4,
+        "Five": 5
+    }
+
+    df["rating"] = df["star_rating"].map(rating_map)
+
+    median_rating = df["rating"].median()
+    df["rating"] = (
+        df["rating"]
+        .fillna(median_rating)
+        .round()
+        .astype(int)
+    )
+
+    df["in_stock"] = df["availability"].str.contains(
+        "In stock",
+        case=False,
+        na=False
+    )
+
+    df["price_inr"] = df["price_gbp"] * EXCHANGE_RATE
+
+    result = df[
+        [
+            "title",
+            "price_gbp",
+            "price_inr",
+            "rating",
+            "in_stock",
+            "category"
+        ]
+    ].copy()
+
+    return result
+
+
+SCHEMA = """ PRAGMA foreign_keys = ON; CREATE TABLE categories ( category_id INTEGER PRIMARY KEY, category_name TEXT UNIQUE NOT NULL ); CREATE TABLE books ( book_id INTEGER PRIMARY KEY, title TEXT NOT NULL, price_gbp REAL, price_inr REAL, rating INTEGER CHECK (rating BETWEEN 1 AND 5), in_stock INTEGER CHECK (in_stock IN (0, 1)), category_id INTEGER NOT NULL REFERENCES categories(category_id) ); """
+
+
+def build_database(df):
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)  # regenerate from scratch every run
+    con = sqlite3.connect(DB_PATH)
+    con.executescript(SCHEMA)
+    con.executemany(
+        "INSERT INTO categories(category_name) VALUES (?)",
+        [(c,) for c in sorted(df["category"].unique())],
+    )
+    cat_ids = dict(con.execute("SELECT category_name, category_id FROM categories"))
+    con.executemany(
+        "INSERT INTO books(title, price_gbp, price_inr, rating, in_stock, category_id) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (r.title, r.price_gbp, r.price_inr, int(r.rating), int(r.in_stock), cat_ids[r.category])
+            for r in df.itertuples()
+        ],
+    )
+    con.commit()
+    return con
+
+def run_queries(connection):
+    queries = {
+        "query_1": """
+            SELECT *
+            FROM books
+            WHERE price_gbp > 40
+        """,
+
+        "query_2": """
+            SELECT title, price_gbp
+            FROM books
+            ORDER BY price_gbp DESC
+            LIMIT 10
+        """,
+
+        "query_3": """
+            SELECT DISTINCT rating
+            FROM books
+            ORDER BY rating
+        """,
+
+        "query_4": """
+            SELECT title, price_gbp
+            FROM books
+            WHERE price_gbp BETWEEN 20 AND 40
+        """,
+
+        "query_5": """
+            SELECT
+                b.title,
+                b.price_gbp,
+                b.rating,
+                c.category_name
+            FROM books b
+            JOIN categories c
+                ON b.category_id = c.category_id
+            ORDER BY b.rating DESC, b.price_gbp DESC
+            LIMIT 10
+        """
+    }
+
+    output_file = DATA_DIR / "query_outputs.txt"
+
+    with open(output_file, "w", encoding="utf-8") as file:
+        for name, query in queries.items():
+            result = pd.read_sql(query, connection)
+
+            file.write(f"\n{name}\n")
+            file.write("=" * 50 + "\n")
+            file.write(query.strip() + "\n\n")
+            file.write(result.to_string(index=False))
+            file.write("\n")
+
+            print(f"\n{name}")
+            print(result)
+
+
+def compare_join_with_merge(connection):
+    books_df = pd.read_sql(
+        "SELECT * FROM books",
+        connection
+    )
+
+    categories_df = pd.read_sql(
+        "SELECT * FROM categories",
+        connection
+    )
+
+    sql_query = """
+        SELECT
+            b.title,
+            b.price_gbp,
+            b.rating,
+            c.category_name
+        FROM books b
+        JOIN categories c
+            ON b.category_id = c.category_id
+    """
+
+    sql_result = pd.read_sql(sql_query, connection)
+
+    pandas_result = pd.merge(
+        books_df,
+        categories_df,
+        on="category_id",
+        how="inner"
+    )
+
+    pandas_result = pandas_result[
+        [
+            "title",
+            "price_gbp",
+            "rating",
+            "category_name"
+        ]
+    ]
+
+    sql_sorted = sql_result.sort_values(
+        ["title", "price_gbp"]
+    ).reset_index(drop=True)
+
+    pandas_sorted = pandas_result.sort_values(
+        ["title", "price_gbp"]
+    ).reset_index(drop=True)
+
+    print("\nSQL JOIN and pandas merge equivalent:")
+    print(sql_sorted.equals(pandas_sorted))
+
+
+def main():
+    raw_df = scrape_books(pages=5)
+
+    print("Raw rows:", len(raw_df))
+
+    raw_df.to_csv(
+        DATA_DIR / "raw_books.csv",
+        index=False
+    )
+
+    clean_df = clean_data(raw_df)
+
+    clean_df.to_csv(
+        DATA_DIR / "clean_books.csv",
+        index=False
+    )
+
+    assert len(clean_df) >= 60
+    assert clean_df["category"].nunique() >= 3
+
+    print("Clean rows:", len(clean_df))
+    print("Categories:", clean_df["category"].nunique())
+
+    connection = build_database(clean_df)
+
+    run_queries(connection)
+
+    compare_join_with_merge(connection)
+
+    connection.close()
+
+    print("\nModule 1 completed successfully.")
+
+
+if __name__ == "__main__":
+    main()
